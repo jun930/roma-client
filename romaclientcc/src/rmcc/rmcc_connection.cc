@@ -261,6 +261,7 @@ namespace rakuten {
               gettimeofday(&tv_last_mklhash,0);
               return true;
             }else {
+	      // @TEST There is no route to reach here.( or fatal bug !!)
               gettimeofday(&tv_last_mklhash,0);
             }
           }catch(const Exception & ex ) {
