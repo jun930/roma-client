@@ -162,22 +162,36 @@ namespace rakuten {
     //RomaConnection::RomaConnection() : seed(345678) {
     RomaConnection::RomaConnection() : seed(time(0)) {
       memset(mklhash,0,sizeof(mklhash));
-      memset(&tv_last_mklhash,0,sizeof(tv_last_mklhash));
+      memset(&tv_last_check,0,sizeof(tv_last_check));
     }
-    int RomaConnection::num_valid() const {
+    size_t RomaConnection::num_valid() const {
       return this->nodelist.size();
     }
-    void RomaConnection::init(const node_info_list_t &nl,routing_mode_t routing_mode){
+    void RomaConnection::init(const node_info_list_t &nl,routing_mode_t routing_mode,unsigned long check_threshold){
+      // save list
+      {
+        this->inited_list_buf.relength(0);
+        this->inited_list.clear();
+        for ( node_info_list_t::const_iterator it(nl.begin()),itend(nl.end());
+              it != itend;
+              it++ ){
+          size_t s = strlen(*it)+1;
+          this->inited_list_buf.append((*it),s);
+          char * p = this->inited_list_buf.get(s);
+          TRACE_LOG("Specialized node : %s",p);
+          this->inited_list.push_back(p);
+        }
+      }
+      this->routing_mode = routing_mode;
+      this->check_threshold = check_threshold;
+
       if ( ! this->num_valid() ) {
         INFO_LOG("Init nodes (%d)",routing_mode);
-        this->routing_mode = routing_mode;
-        this->mklhash_threshold = 10000; // @@@
-        prepare_nodes(nl);
+        prepare_nodes(this->inited_list);
         routing_table();
       }
     }
     void RomaConnection::prepare_nodes(const node_info_list_t &info_list){
-      // @@@ cleen up to ignore node
       for ( node_info_list_t::const_iterator it(info_list.begin()),itend(info_list.end());
             it != itend;
             it++ ) {
@@ -215,17 +229,20 @@ namespace rakuten {
       if (this->routing_mode == ROUTING_MODE_USE ) {
         timeval tv_now;
         gettimeofday(&tv_now,0);
-        unsigned long diff_mklhash = sum_timeval(this->tv_last_mklhash,tv_now);
-        TRACE_LOG("The %lu msec passed from the last mklhash : %lu",diff_mklhash,mklhash_threshold);
-        if ( force || diff_mklhash > this->mklhash_threshold ) {
-          INFO_LOG("Try to get new mklhash (msec:%ld)",diff_mklhash);
+        unsigned long diff_check = sum_timeval(this->tv_last_check,tv_now);
+        TRACE_LOG("The %lu msec passed from the last mklhash : %lu",diff_check,check_threshold);
+        if ( force || diff_check > this->check_threshold ) {
+          INFO_LOG("Try to get new mklhash (msec:%ld)",diff_check);
           Node & node = *this->get_node_random();
           try {
             CmdMklHash cmdmklhash(MKLHASH_TIMEOUT);
             cmdmklhash.prepare();
             this->command(cmdmklhash,node);
-            if ( memcmp(mklhash,cmdmklhash.mklhash,sizeof(mklhash)) ) {
-              WARN_LOG("New routing dump [%s] : mklhash=%s",node.node_info.c_str(),cmdmklhash.mklhash);
+            if ( memcmp(this->mklhash,cmdmklhash.mklhash,sizeof(mklhash)-1) ) {
+              char tmphash[41];
+              memcpy(tmphash,cmdmklhash.mklhash,sizeof(mklhash));
+              tmphash[40] = 0;
+              WARN_LOG("New routing dump [%s] : mklhash(old)=%s : mklhash=%s",node.node_info.c_str(),this->mklhash,cmdmklhash.mklhash);
               // Init datas
               this->dgst_bits = 0;
               this->div_bits  = 0;
@@ -256,14 +273,12 @@ namespace rakuten {
                 }
               }
               this->prepare_nodes(cmdroutingdump.nl);
-              memcpy(this->mklhash,cmdmklhash.mklhash,sizeof(mklhash));
+              memcpy(this->mklhash,tmphash,sizeof(mklhash));
               this->mklhash[40] = 0;
-              gettimeofday(&tv_last_mklhash,0);
+              gettimeofday(&tv_last_check,0);
               return true;
-            }else {
-	      // @TEST There is no route to reach here.( or fatal bug !!)
-              gettimeofday(&tv_last_mklhash,0);
             }
+            gettimeofday(&tv_last_check,0);
           }catch(const Exception & ex ) {
             // @TEST The case of unstabilized connection.
             ERR_LOG("New RoutingTable error [%s]",node.node_info.c_str());
@@ -327,7 +342,19 @@ namespace rakuten {
 
     void RomaConnection::command(Command & cmd){
       Node *node = 0;
-      if ( cmd.get_op() == Command::RANDOM || this->routing_mode != ROUTING_MODE_USE ){
+      if ( this->routing_mode != ROUTING_MODE_USE ){
+        if ( this->num_valid() < this->inited_list.size() ) {
+          timeval tv_now;
+          gettimeofday(&tv_now,0);
+          unsigned long diff_check = sum_timeval(this->tv_last_check,tv_now);
+          if (  diff_check > this->check_threshold ) {
+            INFO_LOG("Try to repair connection (msec:%ld)",diff_check);
+            prepare_nodes(this->inited_list);
+            gettimeofday(&tv_last_check,0);
+          }
+        }
+        node = this->get_node_random();
+      } else if ( cmd.get_op() == Command::RANDOM ){
         node = this->get_node_random();
       } else if( cmd.get_op() == Command::KEYED ){
         std::vector<std::string> & nodes = this->get_node_key(cmd.get_key());
